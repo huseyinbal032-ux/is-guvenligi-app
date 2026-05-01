@@ -1,10 +1,10 @@
-# === BAŞLANGIÇ ===
 import streamlit as st
-from inference_sdk import InferenceHTTPClient
+import requests
+import base64
 from PIL import Image
 import pandas as pd
 import io
-import base64
+import json
 
 # Sayfa ayarları
 st.set_page_config(
@@ -17,7 +17,7 @@ st.set_page_config(
 st.title("🦺 İş Güvenliği Risk Değerlendirme Sistemi")
 st.markdown("Fotoğraf yükleyerek iş güvenliği eksikliklerini tespit edin ve risk değerlendirmesi yapın.")
 
-# Sidebar - Ayarlar
+# Sidebar
 with st.sidebar:
     st.header("⚙️ Ayarlar")
     api_key = st.text_input("Roboflow API Key", type="password", help="Roboflow hesabınızdan alın")
@@ -33,18 +33,13 @@ with st.sidebar:
     st.markdown("### ℹ️ Hakkında")
     st.info("Bu uygulama Roboflow AI modeli ile iş güvenliği eksikliklerini tespit eder ve otomatik risk değerlendirmesi yapar.")
 
-# Tehlike-Risk Eşleştirme Tablosu (Modelinize göre özelleştirilebilir)
+# Tehlike-Risk Tablosu
 TEHLIKE_RISK_TABLOSU = {
-    # Fine-Kinney: Olasılık (O) x Frekans (F) x Şiddet (Ş)
-    # L Matris: Olasılık (O) x Şiddet (Ş)
     "no-helmet": {
         "tehlike": "Baret/Kask Takmama",
         "sonuc": "Kafa travması, beyin hasarı, ölüm",
-        "fk_olasilik": 6,    # Yüksek olasılık
-        "fk_frekans": 6,     # Sürekli
-        "fk_siddet": 15,     # Çok ciddi (ölümcül)
-        "lm_olasilik": 4,    # Yüksek
-        "lm_siddet": 5,      # Çok ciddi
+        "fk_olasilik": 6, "fk_frekans": 6, "fk_siddet": 15,
+        "lm_olasilik": 4, "lm_siddet": 5,
         "onlem": "Kişisel koruyucu donanım (baret) zorunluluğu, eğitim, denetim"
     },
     "helmet": {
@@ -77,7 +72,6 @@ TEHLIKE_RISK_TABLOSU = {
     }
 }
 
-# Varsayılan (bilinmeyen sınıflar için)
 VARSAYILAN_RISK = {
     "tehlike": "Tespit Edilen Durum",
     "sonuc": "Detaylı değerlendirme gerekli",
@@ -87,11 +81,9 @@ VARSAYILAN_RISK = {
 }
 
 def fine_kinney_skor(o, f, s):
-    """Fine-Kinney risk skoru = Olasılık x Frekans x Şiddet"""
     return o * f * s
 
 def fine_kinney_seviye(skor):
-    """Fine-Kinney risk seviyesi"""
     if skor < 20:
         return "🟢 Önemsiz Risk", "Acil önlem gerekmez"
     elif skor < 70:
@@ -101,14 +93,12 @@ def fine_kinney_seviye(skor):
     elif skor < 400:
         return "🔴 Esaslı Risk", "Kısa sürede önlem alınmalı"
     else:
-        return "⚫ Kabul Edilemez Risk", "ACİL önlem alınmalı, çalışma durdurulmalı"
+        return "⚫ Kabul Edilemez Risk", "ACİL önlem alınmalı"
 
 def l_matris_skor(o, s):
-    """L Matris risk skoru = Olasılık x Şiddet"""
     return o * s
 
 def l_matris_seviye(skor):
-    """L Matris risk seviyesi"""
     if skor <= 2:
         return "🟢 Önemsiz Risk", "Önlem gerekli değil"
     elif skor <= 6:
@@ -120,6 +110,23 @@ def l_matris_seviye(skor):
     else:
         return "⚫ Tolere Edilemez Risk", "Çalışma durdurulmalı"
 
+def roboflow_workflow_calistir(api_key, image_bytes):
+    """Roboflow Workflow API'sine direkt HTTP isteği gönderir"""
+    url = "https://serverless.roboflow.com/infer/workflows/hseyins-workspace-vh1ss/detect-count-and-visualize"
+    
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+    
+    payload = {
+        "api_key": api_key,
+        "inputs": {
+            "image": {"type": "base64", "value": image_base64}
+        }
+    }
+    
+    response = requests.post(url, json=payload, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
 # Ana Uygulama
 uploaded_file = st.file_uploader(
     "📸 İş alanı fotoğrafı yükleyin",
@@ -128,7 +135,6 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # Resmi göster
     col1, col2 = st.columns(2)
     
     with col1:
@@ -142,62 +148,60 @@ if uploaded_file is not None:
         if st.button("🔍 Analiz Et", type="primary", use_container_width=True):
             with st.spinner("🤖 Yapay zeka modeli analiz yapıyor..."):
                 try:
-                    # Geçici dosya oluştur
-                    temp_path = "temp_image.jpg"
-                    image.save(temp_path)
+                    # Resmi byte olarak hazırla
+                    image_rgb = image.convert("RGB")
+                    buf = io.BytesIO()
+                    image_rgb.save(buf, format="JPEG")
+                    image_bytes = buf.getvalue()
                     
-                    # Roboflow API'ye gönder
-                    client = InferenceHTTPClient(
-                        api_url="https://serverless.roboflow.com",
-                        api_key=api_key
-                    )
+                    # Roboflow'a gönder
+                    result = roboflow_workflow_calistir(api_key, image_bytes)
                     
-                    result = client.run_workflow(
-                        workspace_name="hseyins-workspace-vh1ss",
-                        workflow_id="detect-count-and-visualize",
-                        images={"image": temp_path},
-                        use_cache=True
-                    )
-                    
-                    # Sonuçları işle
+                    # Sonucu işle
                     with col2:
                         st.subheader("🎯 Tespit Sonucu")
                         
-                        # İşaretlenmiş görsel
-                        if result and len(result) > 0:
-                            output = result[0]
+                        outputs = result.get("outputs", [])
+                        if outputs and len(outputs) > 0:
+                            output = outputs[0]
                             
-                            # Görsel çıktıyı göster
-                            if "label_visualization" in output or "annotated_image" in output:
-                                annotated = output.get("label_visualization") or output.get("annotated_image")
-                                if isinstance(annotated, dict) and "value" in annotated:
-                                    img_data = base64.b64decode(annotated["value"])
-                                    st.image(img_data, use_column_width=True)
-                                elif isinstance(annotated, str):
-                                    img_data = base64.b64decode(annotated)
-                                    st.image(img_data, use_column_width=True)
+                            # İşaretlenmiş görseli göster
+                            for key in ["annotated_image", "label_visualization", "detection_visualization"]:
+                                if key in output:
+                                    img_obj = output[key]
+                                    if isinstance(img_obj, dict) and "value" in img_obj:
+                                        try:
+                                            img_data = base64.b64decode(img_obj["value"])
+                                            st.image(img_data, use_column_width=True)
+                                            break
+                                        except:
+                                            pass
                     
-                    # Tespit edilen nesneler
+                    # Tespit listesi
                     st.markdown("---")
                     st.subheader("📋 Risk Değerlendirme Raporu")
                     
                     predictions = []
-                    if result and len(result) > 0:
-                        output = result[0]
+                    if outputs and len(outputs) > 0:
+                        output = outputs[0]
                         # Predictions farklı yerlerde olabilir
-                        if "predictions" in output:
-                            preds = output["predictions"]
-                            if isinstance(preds, dict) and "predictions" in preds:
-                                predictions = preds["predictions"]
-                            elif isinstance(preds, list):
-                                predictions = preds
+                        for key in ["predictions", "model_predictions"]:
+                            if key in output:
+                                preds = output[key]
+                                if isinstance(preds, dict) and "predictions" in preds:
+                                    predictions = preds["predictions"]
+                                    break
+                                elif isinstance(preds, list):
+                                    predictions = preds
+                                    break
                     
                     if not predictions:
                         st.info("ℹ️ Fotoğrafta herhangi bir nesne tespit edilemedi.")
+                        with st.expander("🔍 Ham Sonuç (Debug)"):
+                            st.json(result)
                     else:
                         st.success(f"✅ Toplam {len(predictions)} nesne tespit edildi")
                         
-                        # Her tespit için risk değerlendirmesi
                         risk_listesi = []
                         for idx, pred in enumerate(predictions, 1):
                             sinif = pred.get("class", "bilinmeyen").lower()
@@ -217,34 +221,30 @@ if uploaded_file is not None:
                                 "Önlem": risk_data["onlem"]
                             }
                             
-                            # Fine-Kinney
                             if risk_method in ["Fine-Kinney", "Her İkisi"]:
                                 fk_skor = fine_kinney_skor(
                                     risk_data["fk_olasilik"],
                                     risk_data["fk_frekans"],
                                     risk_data["fk_siddet"]
                                 )
-                                fk_seviye, fk_aciklama = fine_kinney_seviye(fk_skor)
+                                fk_seviye, _ = fine_kinney_seviye(fk_skor)
                                 satir["FK Skor"] = fk_skor
                                 satir["FK Seviye"] = fk_seviye
                             
-                            # L Matris
                             if risk_method in ["L Matris (5x5)", "Her İkisi"]:
                                 lm_skor = l_matris_skor(
                                     risk_data["lm_olasilik"],
                                     risk_data["lm_siddet"]
                                 )
-                                lm_seviye, lm_aciklama = l_matris_seviye(lm_skor)
+                                lm_seviye, _ = l_matris_seviye(lm_skor)
                                 satir["LM Skor"] = lm_skor
                                 satir["LM Seviye"] = lm_seviye
                             
                             risk_listesi.append(satir)
                         
-                        # Tablo göster
                         df = pd.DataFrame(risk_listesi)
                         st.dataframe(df, use_container_width=True, hide_index=True)
                         
-                        # CSV indir
                         csv = df.to_csv(index=False).encode("utf-8-sig")
                         st.download_button(
                             label="📥 Raporu CSV Olarak İndir",
@@ -253,7 +253,6 @@ if uploaded_file is not None:
                             mime="text/csv"
                         )
                         
-                        # Özet
                         st.markdown("---")
                         st.subheader("📊 Genel Değerlendirme")
                         
@@ -267,6 +266,9 @@ if uploaded_file is not None:
                             uyumlu = len(predictions) - riskli
                             st.metric("Uyumlu Durum", uyumlu)
                 
+                except requests.exceptions.HTTPError as e:
+                    st.error(f"❌ API Hatası: {e.response.status_code}")
+                    st.code(e.response.text)
                 except Exception as e:
                     st.error(f"❌ Hata oluştu: {str(e)}")
                     st.info("💡 İpucu: API Key'inizi ve internet bağlantınızı kontrol edin.")
@@ -274,7 +276,5 @@ if uploaded_file is not None:
 else:
     st.info("👆 Başlamak için yukarıdan bir fotoğraf yükleyin")
 
-# Footer
 st.markdown("---")
 st.caption("🦺 İş Güvenliği Risk Değerlendirme Sistemi v1.0 | Roboflow AI ile güçlendirilmiştir")
-# === SON ===
